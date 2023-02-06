@@ -1,0 +1,386 @@
+#include <NimBLEDevice.h>
+
+#include <Arduino_GFX_Library.h>
+
+#include "ESP32_ISR_Servo.h"
+
+#include "SCServo.h"
+
+TaskHandle_t ReadBat = NULL;
+TaskHandle_t WriteServo = NULL;
+
+SemaphoreHandle_t Semaphore = NULL;
+
+
+static NimBLEServer* pServer;
+
+BLECharacteristic* CharacteristicPOS = NULL;
+BLECharacteristic* CharacteristicFIR = NULL;
+BLECharacteristic* CharacteristicINF = NULL;
+BLECharacteristic* CharacteristicBAT = NULL;
+
+// See the following for generating UUIDs:
+// https://www.uuidgenerator.net/
+
+#define SERVICE_UUID                "91c108a9-c3f1-44bc-b6d0-79d01551c8d7"
+#define CHARACTERISTIC_POS_UUID     "2992535f-e038-4351-91e7-658a633e3507"
+#define CHARACTERISTIC_FIR_UUID     "2992535f-e038-4351-91e7-658a633e3508"
+#define CHARACTERISTIC_INF_UUID     "2992535f-e038-4351-91e7-658a633e3509"
+#define CHARACTERISTIC_BAT_UUID     "00002A19-0000-1000-8000-00805F9B34FB" //Level
+
+// the uart used to control servos.
+// GPIO 18 - S_RXD, GPIO 19 - S_TXD, as default.
+#define S_RXD 34
+#define S_TXD 33
+
+// Select different ESP32 timer number (0-3) to avoid conflict
+#define USE_ESP32_TIMER_NO          0
+
+#define MIN_MICROS      500  //544
+#define MAX_MICROS      1000
+#define MIN_MICROS_S    500  //544
+#define MAX_MICROS_S    1000
+#define PIN_INT         48 // was 16
+#define PIN_BAT         16 // ADC for BAT
+#define PIN_ESC1        17
+#define PIN_ESC2        18
+#define PIN_SERVO1      39
+#define TFT_BL          10
+
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+
+int escIndex1   = -1;
+int escIndex2   = -1;
+int servoIndex1 = -1;
+
+int pos = 0;
+
+int speed_in = 0;
+int speed_out = 0;
+bool speed_first = true;
+bool busy = false;
+
+int pos_x = 0;
+int pos_y = 0;
+int speed_x = 0;
+int speed_y = 0;
+int separator_1, separator_2, separator_3, separator_4, separator_5;
+
+int fire = 0;
+int fire_mode = 0;
+int fire_speed = 0;
+int fire_burst = 0;
+
+String input;
+String reply;
+
+// Battery BLE
+uint8_t bat_level = 57;
+
+// Motor Speed
+volatile unsigned int motor_speed = 0;
+
+/* create a hardware fire timer */
+hw_timer_t * timer = NULL;
+
+Arduino_DataBus *bus = new Arduino_ESP32SPI(6 /* DC */, 5 /* CS */, 3 /* SCK */, 2 /* MOSI */, GFX_NOT_DEFINED /* MISO */);
+Arduino_GFX *gfx = new Arduino_GC9107(bus, 1 /* RST */, 1 /* rotation */, true /* IPS */);
+
+SCSCL sc;
+
+class ServerCallbacks: public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer* pServer) {
+        Serial.println("Client connected");
+        Serial.println("Multi-connect support: start advertising");
+        NimBLEDevice::startAdvertising();
+    };
+    void onDisconnect(NimBLEServer* pServer) {
+        Serial.println("Client disconnected - start advertising");
+        NimBLEDevice::startAdvertising();
+    };
+    void onMTUChange(uint16_t MTU, ble_gap_conn_desc* desc) {
+        Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, desc->conn_handle);
+    };
+  }
+}
+
+// Fire Servo Interrupt
+void IRAM_ATTR onTimer(){
+  gfx->print("Servo End");
+  timerAlarmDisable(timer);		// stop alarm
+  timerDetachInterrupt(timer);	// detach interrupt
+  timerEnd(timer);			// end timer
+  ESP32_ISR_Servos.setPosition(servoIndex1, 125);
+  busy = false;
+  CharacteristicINF->setValue(std::string("Ready"));
+  //CharacteristicINF->notify();
+  xSemaphoreTake(Semaphore, portMAX_DELAY);
+  motor_speed = 0;
+  xSemaphoreGive(Semaphore);
+}
+
+class CallbacksINI: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      input = "";
+      for (int i = 0; i < value.length(); i++){
+        input = input + value[i];
+      }
+    }
+  }
+}
+
+class CallbacksPOS: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      input = "";
+      for (int i = 0; i < value.length(); i++){
+        input = input + value[i];
+      }
+      pos_x = input.toInt();
+      separator_1 = input.indexOf(";");
+      pos_y = input.substring(separator_1+1).toInt();
+      separator_2 = input.indexOf(";", separator_1+1);
+      speed_x = input.substring(separator_2+1).toInt();
+      separator_3 = input.indexOf(";", separator_2+1);
+      speed_y = input.substring(separator_3+1).toInt();
+      Serial.println(input);
+      sc.RegWritePos(0, pos_x, 0, speed_x);
+      sc.RegWritePos(1, pos_y, 0, speed_y);
+      sc.RegWriteAction();
+      input = "Ok";
+      pCharacteristic->setValue(std::string(input.c_str())); // Return status
+    }
+  }
+};
+
+class CallbacksFIR: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string value = pCharacteristic->getValue();
+      if (value.length() > 0) {
+        input = "";
+        for (int i = 0; i < value.length(); i++){
+          // Serial.print(value[i]); // Presenta value.
+          input = input + value[i];
+        }
+        if (!busy) {
+          Serial.println("Fire");
+          fire = input.toInt();
+          separator_1 = input.indexOf(";");
+          fire_mode = input.substring(separator_1+1).toInt();
+          separator_2 = input.indexOf(";", separator_1+1);
+          fire_speed = input.substring(separator_2+1).toInt();
+          separator_3 = input.indexOf(";", separator_2+1);
+          fire_burst = input.substring(separator_3+1).toInt();
+          xSemaphoreTake(Semaphore, portMAX_DELAY);
+          motor_speed = fire_speed;
+          xSemaphoreGive(Semaphore);
+          delay(200);
+          ESP32_ISR_Servos.setPosition(servoIndex1, 10);
+          pCharacteristic->setValue(std::string("Ok")); // Return status
+
+          gfx->println("Servo Start");
+            // Test Timer
+          CharacteristicINF->setValue(std::string("Busy"));
+          CharacteristicINF->notify();
+          busy = true;
+          // Fire Timer
+          timer = timerBegin(2, 80, true);
+          timerAttachInterrupt(timer, &onTimer, true);
+          timerAlarmWrite(timer, 1000000, false);
+          timerAlarmEnable(timer);
+        }
+      }
+    }
+};
+
+
+// Measure dart speed
+// 70mm dart
+void measure_speed()
+{
+  if(speed_first)
+  {
+    speed_in = millis();
+    speed_first = false;
+  }else{
+    speed_out = millis();
+    speed_first = true;
+    gfx->println(speed_out-speed_in);
+  }
+}
+
+void read_bat_loop(void * parameter)
+{
+  for (;;) {
+    if (deviceConnected) {
+      bat_level = random(0,100);
+      CharacteristicBAT->setValue(&bat_level, 1);
+    }
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+  }
+}
+
+void write_servo_loop(void * parameter)
+{
+  int current_value = 0;
+  int new_value = 0;
+  int test_value = 0;
+
+  for (;;) {
+    xSemaphoreTake(Semaphore, portMAX_DELAY);
+    new_value = motor_speed;
+    xSemaphoreGive(Semaphore);
+    if (current_value < new_value) {
+      current_value = new_value;
+      ESP32_ISR_Servos.setPosition(escIndex1, current_value);
+      ESP32_ISR_Servos.setPosition(escIndex2, current_value);
+      Serial.println(current_value);
+    } else if (current_value > new_value) {
+      while (current_value > new_value){
+        xSemaphoreTake(Semaphore, portMAX_DELAY);
+        test_value = motor_speed;
+        xSemaphoreGive(Semaphore);
+        if (test_value > new_value){
+          break;
+        }
+        current_value = current_value - 5;
+        ESP32_ISR_Servos.setPosition(escIndex1, current_value);
+        ESP32_ISR_Servos.setPosition(escIndex2, current_value);
+        Serial.println(current_value);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+      }
+      current_value = new_value;
+    }
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  Serial.println("Test");
+  Semaphore = xSemaphoreCreateMutex();
+
+  xTaskCreatePinnedToCore(
+              read_bat_loop,
+              "ReadBat",
+              1000,
+              NULL,
+              0,
+              &ReadBat,
+              1);
+
+  xTaskCreatePinnedToCore(
+              write_servo_loop,
+              "WriteServo",
+              1000,
+              NULL,
+              0,
+              &WriteServo,
+              1);
+
+  // Setup LCD Screen
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+  gfx->begin(80000000);
+  gfx->fillScreen(BLACK);
+  digitalWrite(TFT_BL, LOW);
+  //Serial.begin(115200);
+
+  // BlueTooth Server
+  gfx->setCursor(0, 0);
+  gfx->println(xPortGetCoreID());
+  gfx->println("Starting BLE work!");
+
+  BLEDevice::init("Turret");
+  BLEServer *Server = BLEDevice::createServer();
+  BLEService *Service = Server->createService(SERVICE_UUID);
+
+  CharacteristicPOS = Service->createCharacteristic(CHARACTERISTIC_POS_UUID,
+                    NIMBLE_PROPERTY::READ |
+                    NIMBLE_PROPERTY::WRITE);
+  BLEDescriptor *DescriptorPOS = CharacteristicPOS->createDescriptor(DESCRIPTOR_POS_UUID);
+
+  CharacteristicFIR = Service->createCharacteristic(CHARACTERISTIC_FIR_UUID,
+                    NIMBLE_PROPERTY::READ |
+                    NIMBLE_PROPERTY::WRITE);
+  BLEDescriptor *DescriptorFIR = CharacteristicFIR->createDescriptor(DESCRIPTOR_FIR_UUID);
+
+  CharacteristicINF = Service->createCharacteristic(CHARACTERISTIC_INF_UUID,
+                    NIMBLE_PROPERTY::READ   |
+                    NIMBLE_PROPERTY::WRITE);
+
+  CharacteristicBAT = Service->createCharacteristic(CHARACTERISTIC_BAT_UUID,
+                    NIMBLE_PROPERTY::READ |
+                    NIMBLE_PROPERTY::WRITE);
+  BLEDescriptor *DescriptorBAT = CharacteristicBAT->createDescriptor(DESCRIPTOR_BAT_UUID);
+
+
+
+  Server->setCallbacks(new MyServerCallbacks());
+
+  // Characteristic INI
+  CharacteristicINI->setCallbacks(new CallbacksINI());
+  CharacteristicINI->setValue(std::string(""));
+
+  // Characteristic POS
+  CharacteristicPOS->setCallbacks(new CallbacksPOS());
+  CharacteristicPOS->setValue(std::string(""));
+
+  // Characteristic FIR
+  CharacteristicFIR->setCallbacks(new CallbacksFIR());
+  CharacteristicFIR->setValue(std::string(""));
+
+
+  // Characteristic INF
+  //CharacteristicINF->setCallbacks(new CallbacksINF());
+  CharacteristicINF->setValue(std::string(""));
+
+  Service->start();
+
+
+  // Start advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(false);
+  /** Note, this could be left out as that is the default value */
+  pAdvertising->setMinPreferred(0x0);  // set value to 0x00 to not advertise this parameter
+
+  BLEDevice::startAdvertising();
+
+  gfx->println("BLE Started");
+
+
+  /* Setup : Loading servo, ESC motor 1 & ESC motor 2
+     Loading servo
+      - low position : 125
+      - high position : 10
+  */
+  escIndex1 = ESP32_ISR_Servos.setupServo(PIN_ESC1, MIN_MICROS, MAX_MICROS);
+  escIndex2 = ESP32_ISR_Servos.setupServo(PIN_ESC2, MIN_MICROS, MAX_MICROS);
+  servoIndex1 = ESP32_ISR_Servos.setupServo(PIN_SERVO1, MIN_MICROS_S, MAX_MICROS_S);
+  delay(500);
+  ESP32_ISR_Servos.setPosition(escIndex1, 0);
+  ESP32_ISR_Servos.setPosition(escIndex2, 0);
+  ESP32_ISR_Servos.setPosition(servoIndex1, 125);
+
+  // Setup : Speed module
+  pinMode(PIN_INT,  INPUT_PULLUP);
+  attachInterrupt(PIN_INT, measure_speed, CHANGE);
+
+  // Setup : Serial servos
+  Serial1.begin(1000000, SERIAL_8N1, S_RXD, S_TXD);
+  sc.pSerial = &Serial1;
+  //---- ESC
+  //Select ESP32 timer USE_ESP32_TIMER_NO
+  ESP32_ISR_Servos.useTimer(USE_ESP32_TIMER_NO);
+}
+
+void loop()
+{
+  vTaskDelete(NULL);
+}
