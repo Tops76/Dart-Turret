@@ -1,30 +1,27 @@
-#include <NimBLEDevice.h>
 #include <Arduino_GFX_Library.h>
 #include "ESP32_ISR_Servo.h"
 #include "SCServo.h"
+
+#include <NimBLEDevice.h>
+
+BLEServer *pServer = NULL;
+BLECharacteristic * pTxCharacteristic;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+uint8_t txValue = 0;
+
+// See the following for generating UUIDs:
+// https://www.uuidgenerator.net/
+
+#define SERVICE_UUID           "DEAD" // UART service UUID
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
 
 TaskHandle_t ReadBat = NULL;
 TaskHandle_t WriteServo = NULL;
 
 SemaphoreHandle_t Semaphore = NULL;
-
-
-static NimBLEServer* pServer;
-static NimBLECharacteristic* CharacteristicPOS;
-static NimBLECharacteristic* CharacteristicFIR;
-volatile static NimBLECharacteristic* CharacteristicINF;
-static NimBLECharacteristic* CharacteristicINI;
-static NimBLECharacteristic* CharacteristicBAT;
-
-// See the following for generating UUIDs:
-// https://www.uuidgenerator.net/
-
-#define SERVICE_UUID                "DEAD"
-#define CHARACTERISTIC_POS_UUID     "DCA1"
-#define CHARACTERISTIC_FIR_UUID     "DCA2"
-#define CHARACTERISTIC_INF_UUID     "DCA3"
-#define CHARACTERISTIC_INI_UUID     "DCA4"
-#define CHARACTERISTIC_BAT_UUID     "DCA5" //Level
 
 // the uart used to control servos.
 // GPIO 18 - S_RXD, GPIO 19 - S_TXD, as default.
@@ -45,8 +42,6 @@ static NimBLECharacteristic* CharacteristicBAT;
 #define PIN_SERVO1      39
 #define TFT_BL          10
 
-bool deviceConnected = false;
-bool oldDeviceConnected = false;
 
 int escIndex1   = -1;
 int escIndex2   = -1;
@@ -71,8 +66,10 @@ int fire_speed = 0;
 int fire_burst = 0;
 int fire_auto_speed = 0;
 
-volatile int servo_back = 125;
-volatile int servo_front = 10;
+volatile int servo_back = 120;
+volatile int servo_front = 5;
+String rxString;
+String txString;
 
 // Battery BLE
 uint8_t bat_level = 57;
@@ -88,122 +85,40 @@ Arduino_GFX *gfx = new Arduino_GC9107(bus, 1 /* RST */, 1 /* rotation */, true /
 
 SCSCL sc;
 
-class ServerCallbacks: public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer* pServer) {
-      Serial.println("Client connected");
-      gfx->println("Client connected");
-      Serial.println("Multi-connect support: start advertising");
-      NimBLEDevice::startAdvertising();
+/**  None of these are required as they will be handled by the library with defaults. **
+ **                       Remove as you see fit for your needs                        */  
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
   };
-  void onDisconnect(NimBLEServer* pServer) {
-      Serial.println("Client disconnected - start advertising");
-      gfx->println("Client disconnected");
-      NimBLEDevice::startAdvertising();
-  };
-  void onMTUChange(uint16_t MTU, ble_gap_conn_desc* desc) {
-      Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, desc->conn_handle);
-  };
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+  }
 };
 
-// Fire Servo Interrupt
-void IRAM_ATTR onTimer(){
-  gfx->print("Servo End");
-  Serial.println("End FIRE Timer");
-  timerAlarmDisable(timer);		// stop alarm
-  timerDetachInterrupt(timer);	// detach interrupt
-  timerEnd(timer);			// end timer
-  ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
-  busy = false;
-  CharacteristicINF->setValue(std::string("Ready"));
-  //xSemaphoreTake(Semaphore, portMAX_DELAY);
-  motor_speed = 0;
-  //xSemaphoreGive(Semaphore);
-  ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
-  ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
-}
-
-/** Handler class for characteristic actions */
-class CharacteristicCallbacks: public NimBLECharacteristicCallbacks {
-  void onRead(NimBLECharacteristic* pCharacteristic){
-      Serial.print(pCharacteristic->getUUID().toString().c_str());
-      Serial.print(": onRead(), value: ");
-      Serial.println(pCharacteristic->getValue().c_str());
-  };
-
-  void onWrite(NimBLECharacteristic* pCharacteristic) {
-      Serial.print(pCharacteristic->getUUID().toString().c_str());
-      Serial.print(": onWrite(), value: ");
-      Serial.println(pCharacteristic->getValue().c_str());
-      if (pCharacteristic->getUUID() == CharacteristicPOS->getUUID() ){
-        String value = pCharacteristic->getValue().c_str();
-        if (value.length() > 0) {
-          pos_x = value.toInt();
-          separator_1 = value.indexOf(";");
-          pos_y = value.substring(separator_1+1).toInt();
-          Serial.println(pos_x);
-          Serial.println(pos_y);
-          sc.RegWritePos(0, pos_x, 0, speed_x);
-          sc.RegWritePos(1, pos_y, 0, speed_y);
-          sc.RegWriteAction();
-          pCharacteristic->setValue(std::string("Ok")); // Return status
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      rxString = pCharacteristic->getValue();
+      if (rxString.length() > 0) {
+        switch (rxString[0]) {
+          case 'P':
+            txString = "P;Busy";
+            break;
+          case 'F':
+            txString = "F;Busy";
+            break;
+          case 'B':
+            txString = "B;Busy";
+            break;
+          default:
+            txString = "X;Error";
+            break;
         }
       }
-      if (pCharacteristic->getUUID() == CharacteristicFIR->getUUID() ){
-        String value = pCharacteristic->getValue().c_str();
-        if (value.length() > 0) {
-          if (!busy) {
-            Serial.println(fire);
-            xSemaphoreTake(Semaphore, portMAX_DELAY);
-            fire = value.toInt();
-            motor_speed = fire_speed;
-            CharacteristicINF->setValue(std::string("Busy"));
-            xSemaphoreGive(Semaphore);
-          }
-        }
-      }
-      if (pCharacteristic->getUUID() == CharacteristicINI->getUUID() ){
-        String value = pCharacteristic->getValue().c_str();
-        if (value.length() > 0) {
-          if ((value.charAt(0)) == 'P') {
-            speed_x = value.substring(1).toInt();
-            separator_1 = value.indexOf(";");
-            speed_y = value.substring(separator_1+1).toInt();
-            Serial.println("Setup Position values");
-            Serial.println(speed_x);
-            Serial.println(speed_y);
-            pCharacteristic->setValue(std::string("Ok")); // Return status
-          }
-          if ((value.charAt(0)) == 'F') {
-            fire_mode = value.substring(1).toInt();
-            separator_1 = value.indexOf(";");
-            fire_speed = value.substring(separator_1+1).toInt();
-            separator_2 = value.indexOf(";", separator_1+1);
-            fire_burst = value.substring(separator_2+1).toInt();
-            separator_3 = value.indexOf(";", separator_2+1);
-            fire_auto_speed = value.substring(separator_3+1).toInt();
-            Serial.println("Setup Fire values");
-            Serial.println(fire_mode);
-            Serial.println(fire_speed);
-            Serial.println(fire_burst);
-            Serial.println(fire_auto_speed);
-            pCharacteristic->setValue(std::string("Ok")); // Return status
-          }
-          if ((value.charAt(0)) == 'S') {
-            servo_back = value.substring(1).toInt();
-            separator_1 = value.indexOf(";");
-            servo_front = value.substring(separator_1+1).toInt();
-            Serial.println("Setup Position values");
-            Serial.println(servo_back);
-            Serial.println(servo_front);
-            pCharacteristic->setValue(std::string("Ok")); // Return status
-            ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
-          }
-        }
-      }
-  };
-} ;
+    }
+};
 
-static CharacteristicCallbacks chrCallbacks;
 
 // Measure dart speed
 // 70mm dart
@@ -266,21 +181,87 @@ void write_servo_loop(void * parameter)
       xSemaphoreTake(Semaphore, portMAX_DELAY);
       fire = 0;
       motor_speed = 0;
-      CharacteristicINF->setValue(std::string("Ready"));
       xSemaphoreGive(Semaphore);
     }
   }
   vTaskDelay(10 / portTICK_PERIOD_MS);
 }
 
+void moveTurret(const String& dataString)
+{
+  Serial.println(dataString);
+  pos_x = dataString.toInt();
+  separator_1 = dataString.indexOf(";");
+  pos_y = dataString.substring(separator_1+1).toInt();
+  separator_2 = dataString.indexOf(";", separator_1+1);
+  speed_x = dataString.substring(separator_2+1).toInt();
+  separator_3 = dataString.indexOf(";", separator_2+1);
+  speed_y = dataString.substring(separator_3+1).toInt();
+  Serial.println("Position values");
+  Serial.println(pos_x);
+  Serial.println(pos_y);
+  Serial.println(speed_x);
+  Serial.println(speed_y);
+  sc.RegWritePos(0, pos_x, 0, speed_x);
+  sc.RegWritePos(1, pos_y, 0, speed_y);
+  sc.RegWriteAction();
+  txString = "P;Ready";
+}
+
+void fireDart(const String& dataString)
+{
+  Serial.println(dataString);
+  fire = dataString.toInt();
+  separator_1 = dataString.indexOf(";");
+  Serial.println(separator_1);
+  Serial.println("---------");
+  fire_mode = dataString.substring(separator_1+1).toInt();
+  separator_2 = dataString.indexOf(";", separator_1+1);
+  fire_speed = dataString.substring(separator_2+1).toInt();
+  separator_3 = dataString.indexOf(";", separator_2+1);
+  fire_burst = dataString.substring(separator_3+1).toInt();
+  separator_4 = dataString.indexOf(";", separator_3+1);
+  fire_auto_speed = dataString.substring(separator_4+1).toInt();
+  Serial.println("Fire values :");
+  Serial.println(fire);
+  Serial.println(fire_mode);
+  Serial.println(fire_speed);
+  Serial.println(fire_burst);
+  Serial.println(fire_auto_speed);
+
+  motor_speed = fire_speed;
+  Serial.println("Start motors");
+  ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
+  ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
+  vTaskDelay(300 / portTICK_PERIOD_MS);
+  Serial.println("Push dart");
+  ESP32_ISR_Servos.enable(servoIndex1);
+  ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
+  vTaskDelay(300 / portTICK_PERIOD_MS);
+  ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
+  Serial.println("Stop motors");
+  while (motor_speed > 0){
+    motor_speed = motor_speed - 5;
+    ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
+    ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
+    Serial.println(motor_speed);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+  ESP32_ISR_Servos.disable(servoIndex1);
+  motor_speed = 0;
+  txString = "F;Ready";
+}
+
 void setup()
 {
+  txString.reserve(64);
+  rxString.reserve(64);
   Serial.begin(115200);
-
+  Serial.setTxTimeoutMs(0);
   Semaphore = xSemaphoreCreateMutex();
 
-  xTaskCreatePinnedToCore(read_bat_loop, "ReadBat", 1000, NULL, 0, &ReadBat, 1); 
-  xTaskCreatePinnedToCore(write_servo_loop, "WriteServo", 1000, NULL, 0, &WriteServo, 1);
+  //xTaskCreatePinnedToCore(read_bat_loop, "ReadBat", 1000, NULL, 0, &ReadBat, 1); 
+  //xTaskCreatePinnedToCore(write_servo_loop, "WriteServo", 1000, NULL, 0, &WriteServo, 1);
 
   // Setup LCD Screen
   pinMode(TFT_BL, OUTPUT);
@@ -293,91 +274,44 @@ void setup()
   // BlueTooth Server
   gfx->setCursor(0, 0);
   gfx->println(xPortGetCoreID());
-  gfx->println("Starting BLE work!");
+  gfx->println("Starting BlueTooth work!");
+  // Create the BLE Device
+  BLEDevice::init("DART Turret");
 
-  /** sets device name */
-  NimBLEDevice::init("Dart-Turret");
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
 
-  pServer = NimBLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  // Set Servive
-  NimBLEService* pDeadService = pServer->createService(SERVICE_UUID);
+  // Create a BLE Characteristic
+  pTxCharacteristic = pService->createCharacteristic( CHARACTERISTIC_UUID_TX, NIMBLE_PROPERTY::NOTIFY);
+  BLECharacteristic * pRxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID_RX, NIMBLE_PROPERTY::WRITE);
+  pRxCharacteristic->setCallbacks(new MyCallbacks());
 
-  // Set Characteristic POS
-  CharacteristicPOS = pDeadService->createCharacteristic(
-                                              CHARACTERISTIC_POS_UUID,
-                                              NIMBLE_PROPERTY::READ |
-                                              NIMBLE_PROPERTY::WRITE
-                                            );
-  CharacteristicPOS->setValue("");
-  CharacteristicPOS->setCallbacks(&chrCallbacks);
+  // Start the service
+  pService->start();
 
-  // Set Characteristic FIR
-  CharacteristicFIR = pDeadService->createCharacteristic(
-                                              CHARACTERISTIC_FIR_UUID,
-                                              NIMBLE_PROPERTY::READ |
-                                              NIMBLE_PROPERTY::WRITE
-                                            );
-  CharacteristicFIR->setValue("");
-  CharacteristicFIR->setCallbacks(&chrCallbacks);
-
-  // Set Characteristic INF
-  CharacteristicINF = pDeadService->createCharacteristic(
-                                              CHARACTERISTIC_INF_UUID,
-                                              NIMBLE_PROPERTY::READ |
-                                              NIMBLE_PROPERTY::WRITE
-                                            );
-  CharacteristicINF->setValue("Ready");
-  CharacteristicINF->setCallbacks(&chrCallbacks);
-
-  // Set Characteristic INI
-  CharacteristicINI = pDeadService->createCharacteristic(
-                                              CHARACTERISTIC_INI_UUID,
-                                              NIMBLE_PROPERTY::READ |
-                                              NIMBLE_PROPERTY::WRITE
-                                            );
-  CharacteristicINI->setValue("");
-  CharacteristicINI->setCallbacks(&chrCallbacks);
-
-  // Set Characteristic BAT
-  CharacteristicBAT = pDeadService->createCharacteristic(
-                                              CHARACTERISTIC_BAT_UUID,
-                                              NIMBLE_PROPERTY::READ |
-                                              NIMBLE_PROPERTY::WRITE
-                                            );
-  CharacteristicBAT->setValue("");
-  CharacteristicBAT->setCallbacks(&chrCallbacks);
-
-  /** Start the services when finished creating all Characteristics and Descriptors */
-  pDeadService->start();
-
-  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-  /** Add the services to the advertisment data **/
-  pAdvertising->addServiceUUID(pDeadService->getUUID());
-  /** If your device is battery powered you may consider setting scan response
-   *  to false as it will extend battery life at the expense of less data sent.
-   */
-  pAdvertising->setScanResponse(true);
-  pAdvertising->start();
-
-  Serial.println("Advertising Started");
+  // Start advertising
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting a client connection to notify...");
   gfx->println("BLE Started");
-
 
   /* Setup : Loading servo, ESC motor 1 & ESC motor 2
      Loading servo
       - low position : 125
       - high position : 10
   */
+
   escIndex1 = ESP32_ISR_Servos.setupServo(PIN_ESC1, MIN_MICROS, MAX_MICROS);
   escIndex2 = ESP32_ISR_Servos.setupServo(PIN_ESC2, MIN_MICROS, MAX_MICROS);
   servoIndex1 = ESP32_ISR_Servos.setupServo(PIN_SERVO1, MIN_MICROS_S, MAX_MICROS_S);
-  delay(500);
   ESP32_ISR_Servos.setPosition(escIndex1, 0);
   ESP32_ISR_Servos.setPosition(escIndex2, 0);
   ESP32_ISR_Servos.setPosition(servoIndex1, 125);
-
+  delay(500);
+  ESP32_ISR_Servos.disable(servoIndex1);
   // Setup : Speed module
   pinMode(PIN_INT,  INPUT_PULLUP);
   attachInterrupt(PIN_INT, measure_speed, CHANGE);
@@ -392,5 +326,45 @@ void setup()
 
 void loop()
 {
-  delay(1000);
+    if (deviceConnected && txString.length() != 0) {
+      pTxCharacteristic->setValue(String(txString.c_str()));
+      pTxCharacteristic->notify();
+      txString = "";
+      delay(10); // bluetooth stack will go into congestion, if too many packets are sent
+    }
+    if (rxString.length() != 0){
+      switch (rxString[0]) {
+        case 'P':
+          moveTurret(rxString.substring(2));
+          break;
+        case 'F':
+          gfx->println("Fire Started");
+          fireDart(rxString.substring(2));
+          gfx->println("Fire Ended");
+          break;
+        case 'B':
+          Serial.println("Batery\n");
+          break;
+        case 'S':
+          Serial.println("Setup\n");
+          break;
+        default:
+          Serial.println("Error\n");
+          break;
+      }
+      rxString = "";
+    }
+    // disconnecting
+    if (!deviceConnected && oldDeviceConnected) {
+      delay(500); // give the bluetooth stack the chance to get things ready
+      pServer->startAdvertising(); // restart advertising
+      Serial.println("start advertising");
+      oldDeviceConnected = deviceConnected;
+    }
+    // connecting
+    if (deviceConnected && !oldDeviceConnected) {
+      // do stuff here on connecting
+      oldDeviceConnected = deviceConnected;
+    }
+    delay(10);
 }
