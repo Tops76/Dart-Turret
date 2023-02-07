@@ -6,20 +6,21 @@
 
 BLEServer *pServer = NULL;
 BLECharacteristic * pTxCharacteristic;
-bool deviceConnected = false;
-bool oldDeviceConnected = false;
+BLECharacteristic * pTxPosCharacteristic;
+volatile bool deviceConnected = false;
+volatile bool oldDeviceConnected = false;
 uint8_t txValue = 0;
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
 
-#define SERVICE_UUID           "DEAD" // UART service UUID
-#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define SERVICE_UUID              "DEAD" // UART service UUID
+#define CHARACTERISTIC_UUID_RX    "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX    "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TXPOS "6E400005-B5A3-F393-E0A9-E50E24DCCA9E"
 
-
-TaskHandle_t ReadBat = NULL;
-TaskHandle_t WriteServo = NULL;
+TaskHandle_t read_bat = NULL;
+TaskHandle_t pos_loop = NULL;
 
 SemaphoreHandle_t Semaphore = NULL;
 
@@ -51,23 +52,26 @@ volatile unsigned long dart_speed = 100;
 volatile unsigned long speed_in = 0;
 volatile unsigned long speed_out = 0;
 volatile bool speed_first = true;
+volatile int shout = 0;
 
-int pos_x = 0;
-int pos_y = 0;
-int speed_x = 0;
-int speed_y = 0;
-int separator_1, separator_2, separator_3, separator_4, separator_5;
+volatile int pos_x = 0;
+volatile int pos_y = 0;
+volatile int speed_x = 0;
+volatile int speed_y = 0;
+volatile int separator_1, separator_2, separator_3, separator_4, separator_5;
 
 volatile int fire = 0;
-int fire_mode = 0;
-int fire_speed = 0;
-int fire_burst = 0;
-int fire_auto_speed = 0;
+volatile int fire_mode = 0;
+volatile int fire_speed = 0;
+volatile int fire_burst = 0;
+volatile int fire_auto_speed = 0;
 
 volatile int servo_back = 120;
 volatile int servo_front = 5;
 String rxString;
 String txString;
+String rxPosString;
+String txPosString;
 
 // Motor Speed
 volatile unsigned int motor_speed = 0;
@@ -98,7 +102,7 @@ class MyCallbacks: public BLECharacteristicCallbacks {
       if (rxString.length() > 0) {
         switch (rxString[0]) {
           case 'P':
-            txString = "P;Busy";
+            txPosString = "P;Busy";
             break;
           case 'F':
             txString = "F;Busy";
@@ -114,7 +118,6 @@ class MyCallbacks: public BLECharacteristicCallbacks {
     }
 };
 
-
 // Reset dart speed measure
 // Fire Interrupt
 void IRAM_ATTR onTimer(){
@@ -123,7 +126,7 @@ void IRAM_ATTR onTimer(){
   timerDetachInterrupt(timer);	// detach interrupt
   timerEnd(timer);			// end timer
   speed_first = true;
-  dart_speed = 0;
+  shout = -1;
 }
 
 // Measure dart speed
@@ -136,23 +139,20 @@ void measure_speed()
   {
     speed_in = micros();
     speed_first = false;
-    timer = timerBegin(0, 80, true);
-    timerAttachInterrupt(timer, &onTimer, true);
-    timerAlarmWrite(timer, 500000, true);
-    timerAlarmEnable(timer);
   }else{
     speed_out = micros();
     timerAlarmDisable(timer);		// stop alarm
     timerDetachInterrupt(timer);	// detach interrupt
     timerEnd(timer);			// end timer
     speed_first = true;
-    dart_speed = (speed_out - speed_in) / 5112;
+    dart_speed = int(70.0 / (speed_out - speed_in) * 3600.0);
+    shout = 1;
   }
 
 }
 
 
-void read_bat_loop(void * parameter)
+void readBatLoop(void * parameter)
 {
   for (;;) {
     if (deviceConnected) {
@@ -182,13 +182,11 @@ void moveTurret(const String& dataString)
   sc.RegWritePos(0, pos_x, 0, speed_x);
   sc.RegWritePos(1, pos_y, 0, speed_y);
   sc.RegWriteAction();
-  txString = "P;Ready";
+  txPosString = "P;Ready";
 }
 
 void fireDart(const String& dataString)
 {
-  int loop = 1;
-
   fire = dataString.toInt();
   separator_1 = dataString.indexOf(";");
   fire_mode = dataString.substring(separator_1+1).toInt();
@@ -205,36 +203,50 @@ void fireDart(const String& dataString)
   Serial.println(fire_burst);
   Serial.println(fire_auto_speed);
 
-  if(fire == 1){
-    motor_speed = fire_speed;
+  motor_speed = fire_speed;
 
+  ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
+  ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
+  vTaskDelay(300 / portTICK_PERIOD_MS);
+  ESP32_ISR_Servos.enable(servoIndex1);
+  Serial.println(servo_front);
+  ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
+
+  // Set timer fot shouting error
+  timer = timerBegin(0, 80, true);
+  timerAttachInterrupt(timer, &onTimer, true);
+  timerAlarmWrite(timer, 500000, true);
+  timerAlarmEnable(timer);
+
+  while (shout == 0){
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+  Serial.println(motor_speed);
+  vTaskDelay(300 / portTICK_PERIOD_MS);
+  Serial.println(servo_back);
+  ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
+
+  // Slow down the motors
+  while (motor_speed > 0){
+    motor_speed = motor_speed - 5;
     ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
     ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
-    vTaskDelay(300 / portTICK_PERIOD_MS);
-    ESP32_ISR_Servos.enable(servoIndex1);
-    ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
-    while (speed_first == false){
-      vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
-    //vTaskDelay(300 / portTICK_PERIOD_MS);
-    ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
-    vTaskDelay(250 / portTICK_PERIOD_MS);
-
-    txString = "F;Ready;";
-    txString += dart_speed;
-  }else{
-    // Slow down the motors
-    while (motor_speed > 0){
-      motor_speed = motor_speed - 5;
-      ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
-      ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
-      Serial.println(motor_speed);
-      vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
-    txString = "F;Ready;";
-    txString += dart_speed;
-    motor_speed = 0;
+    Serial.println(motor_speed);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
   }
+  gfx->setCursor(0, 0);
+  gfx->fillScreen(BLACK);
+  gfx->println(speed_in);
+  gfx->println(speed_out);
+  gfx->println(dart_speed);
+  if (shout == -1){
+    txString = "F;Ready;ERR";
+  }else{
+    txString = "F;Ready;";
+    txString += dart_speed;
+  }
+
+  motor_speed = 0;
   ESP32_ISR_Servos.disable(servoIndex1);
 }
 
@@ -242,12 +254,15 @@ void setup()
 {
   txString.reserve(64);
   rxString.reserve(64);
+  txPosString.reserve(64);
+  rxPosString.reserve(64);
+
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
   Semaphore = xSemaphoreCreateMutex();
 
-  xTaskCreatePinnedToCore(read_bat_loop, "ReadBat", 1000, NULL, 0, &ReadBat, 1); 
-  //xTaskCreatePinnedToCore(write_servo_loop, "WriteServo", 1000, NULL, 0, &WriteServo, 1);
+  xTaskCreatePinnedToCore(readBatLoop, "ReadBat", 1000, NULL, 0, &read_bat, 1); 
+  //xTaskCreatePinnedToCore(posLoop, "PosLoop", 1000, NULL, 0, &pos_loop, 1);
 
   // Setup LCD Screen
   pinMode(TFT_BL, OUTPUT);
@@ -275,6 +290,8 @@ void setup()
   pTxCharacteristic = pService->createCharacteristic( CHARACTERISTIC_UUID_TX, NIMBLE_PROPERTY::NOTIFY);
   BLECharacteristic * pRxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID_RX, NIMBLE_PROPERTY::WRITE);
   pRxCharacteristic->setCallbacks(new MyCallbacks());
+
+  pTxPosCharacteristic = pService->createCharacteristic( CHARACTERISTIC_UUID_TXPOS, NIMBLE_PROPERTY::NOTIFY);
 
   // Start the service
   pService->start();
@@ -316,6 +333,12 @@ void loop()
       pTxCharacteristic->setValue(String(txString.c_str()));
       pTxCharacteristic->notify();
       txString = "";
+      delay(10); // bluetooth stack will go into congestion, if too many packets are sent
+    }
+    if (deviceConnected && txPosString.length() != 0) {
+      pTxPosCharacteristic->setValue(String(txPosString.c_str()));
+      pTxPosCharacteristic->notify();
+      txPosString = "";
       delay(10); // bluetooth stack will go into congestion, if too many packets are sent
     }
     if (rxString.length() != 0){
