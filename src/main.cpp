@@ -35,7 +35,7 @@ SemaphoreHandle_t Semaphore = NULL;
 #define MAX_MICROS      1000
 #define MIN_MICROS_S    500  //544
 #define MAX_MICROS_S    1000
-#define PIN_INT         48 // was 16
+#define PIN_INT         16 // was 48
 #define PIN_BAT         16 // ADC for BAT
 #define PIN_ESC1        17
 #define PIN_ESC2        18
@@ -47,12 +47,9 @@ int escIndex1   = -1;
 int escIndex2   = -1;
 int servoIndex1 = -1;
 
-int pos = 0;
-
-int speed_in = 0;
-int speed_out = 0;
-bool speed_first = true;
-bool busy = false;
+volatile unsigned long speed_in = 0;
+volatile unsigned long speed_out = 0;
+volatile bool speed_first = true;
 
 int pos_x = 0;
 int pos_y = 0;
@@ -70,9 +67,6 @@ volatile int servo_back = 120;
 volatile int servo_front = 5;
 String rxString;
 String txString;
-
-// Battery BLE
-uint8_t bat_level = 57;
 
 // Motor Speed
 volatile unsigned int motor_speed = 0;
@@ -120,71 +114,54 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 };
 
 
+// Reset dart speed measure
+// Fire Servo Interrupt
+void IRAM_ATTR onTimer(){
+  Serial.println("End Timer");
+  timerAlarmDisable(timer);		// stop alarm
+  timerDetachInterrupt(timer);	// detach interrupt
+  timerEnd(timer);			// end timer
+  speed_first = true;
+}
+
 // Measure dart speed
 // 70mm dart
 void measure_speed()
 {
+  unsigned long speed;
+
   if(speed_first)
   {
-    speed_in = millis();
+    speed_in = micros();
     speed_first = false;
+    timer = timerBegin(0, 80, true);
+    timerAttachInterrupt(timer, &onTimer, true);
+    timerAlarmWrite(timer, 500000, true);
+    timerAlarmEnable(timer);
   }else{
-    speed_out = millis();
+    speed_out = micros();
+    timerAlarmDisable(timer);		// stop alarm
+    timerDetachInterrupt(timer);	// detach interrupt
+    timerEnd(timer);			// end timer
     speed_first = true;
-    gfx->println(speed_out-speed_in);
+    speed = (speed_out - speed_in) / 5112;
+    txString = "S;" + speed;
+    Serial.println(txString);
   }
+
 }
+
 
 void read_bat_loop(void * parameter)
 {
   for (;;) {
     if (deviceConnected) {
-      bat_level = random(0,100);
+      txString = "B;50";
+      //bat_level = random(0,100);
       //CharacteristicBAT->setValue(&bat_level, 1);
     }
     vTaskDelay(5000 / portTICK_PERIOD_MS);
   }
-}
-
-void write_servo_loop(void * parameter)
-{
-  int current_value = 0;
-  int new_value = 0;
-  int test_value = 0;
-  int f = 0;
-  int s_b = 0;
-  int s_f = 0;
-  for (;;) {
-    xSemaphoreTake(Semaphore, portMAX_DELAY);
-    current_value = motor_speed;
-    f = fire;
-    s_b = servo_back;
-    s_f = servo_front;
-    xSemaphoreGive(Semaphore);
-    if(f){
-      Serial.println("Start motors");
-      ESP32_ISR_Servos.setPosition(escIndex1, current_value);
-      ESP32_ISR_Servos.setPosition(escIndex2, current_value);
-      vTaskDelay(300 / portTICK_PERIOD_MS);
-      Serial.println("Push dart");
-      ESP32_ISR_Servos.setPosition(servoIndex1, s_f);
-      vTaskDelay(300 / portTICK_PERIOD_MS);
-      ESP32_ISR_Servos.setPosition(servoIndex1, s_b);
-      Serial.println("Stop motors");
-      while (current_value > 0){
-        current_value = current_value - 5;
-        ESP32_ISR_Servos.setPosition(escIndex1, current_value);
-        ESP32_ISR_Servos.setPosition(escIndex2, current_value);
-        Serial.println(current_value);
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-      }
-      xSemaphoreTake(Semaphore, portMAX_DELAY);
-      fire = 0;
-      motor_speed = 0;
-      xSemaphoreGive(Semaphore);
-    }
-  }
-  vTaskDelay(10 / portTICK_PERIOD_MS);
 }
 
 void moveTurret(const String& dataString)
@@ -230,16 +207,13 @@ void fireDart(const String& dataString)
   Serial.println(fire_auto_speed);
 
   motor_speed = fire_speed;
-  Serial.println("Start motors");
   ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
   ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
   vTaskDelay(300 / portTICK_PERIOD_MS);
-  Serial.println("Push dart");
   ESP32_ISR_Servos.enable(servoIndex1);
   ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
   vTaskDelay(300 / portTICK_PERIOD_MS);
   ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
-  Serial.println("Stop motors");
   while (motor_speed > 0){
     motor_speed = motor_speed - 5;
     ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
@@ -260,7 +234,7 @@ void setup()
   Serial.setTxTimeoutMs(0);
   Semaphore = xSemaphoreCreateMutex();
 
-  //xTaskCreatePinnedToCore(read_bat_loop, "ReadBat", 1000, NULL, 0, &ReadBat, 1); 
+  xTaskCreatePinnedToCore(read_bat_loop, "ReadBat", 1000, NULL, 0, &ReadBat, 1); 
   //xTaskCreatePinnedToCore(write_servo_loop, "WriteServo", 1000, NULL, 0, &WriteServo, 1);
 
   // Setup LCD Screen
