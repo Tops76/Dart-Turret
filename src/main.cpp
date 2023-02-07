@@ -220,6 +220,9 @@ void fireDart(const String& dataString)
     }
     //vTaskDelay(300 / portTICK_PERIOD_MS);
     ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
+    vTaskDelay(250 / portTICK_PERIOD_MS);
+    txString = "F;Ready;";
+    txString += dart_speed;
   }
   // Slow down the motors
   while (motor_speed > 0){
@@ -231,8 +234,6 @@ void fireDart(const String& dataString)
   }
   ESP32_ISR_Servos.disable(servoIndex1);
   motor_speed = 0;
-  txString = "F;Ready;";
-  txString += dart_speed;
 }
 
 void setup()
