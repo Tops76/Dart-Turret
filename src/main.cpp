@@ -47,6 +47,7 @@ int escIndex1   = -1;
 int escIndex2   = -1;
 int servoIndex1 = -1;
 
+volatile unsigned long dart_speed = 100;
 volatile unsigned long speed_in = 0;
 volatile unsigned long speed_out = 0;
 volatile bool speed_first = true;
@@ -115,13 +116,14 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 
 
 // Reset dart speed measure
-// Fire Servo Interrupt
+// Fire Interrupt
 void IRAM_ATTR onTimer(){
   Serial.println("End Timer");
   timerAlarmDisable(timer);		// stop alarm
   timerDetachInterrupt(timer);	// detach interrupt
   timerEnd(timer);			// end timer
   speed_first = true;
+  dart_speed = 0;
 }
 
 // Measure dart speed
@@ -144,9 +146,7 @@ void measure_speed()
     timerDetachInterrupt(timer);	// detach interrupt
     timerEnd(timer);			// end timer
     speed_first = true;
-    speed = (speed_out - speed_in) / 5112;
-    txString = "S;" + speed;
-    Serial.println(txString);
+    dart_speed = (speed_out - speed_in) / 5112;
   }
 
 }
@@ -187,11 +187,10 @@ void moveTurret(const String& dataString)
 
 void fireDart(const String& dataString)
 {
-  Serial.println(dataString);
+  int loop = 1;
+
   fire = dataString.toInt();
   separator_1 = dataString.indexOf(";");
-  Serial.println(separator_1);
-  Serial.println("---------");
   fire_mode = dataString.substring(separator_1+1).toInt();
   separator_2 = dataString.indexOf(";", separator_1+1);
   fire_speed = dataString.substring(separator_2+1).toInt();
@@ -207,13 +206,22 @@ void fireDart(const String& dataString)
   Serial.println(fire_auto_speed);
 
   motor_speed = fire_speed;
-  ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
-  ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
-  vTaskDelay(300 / portTICK_PERIOD_MS);
-  ESP32_ISR_Servos.enable(servoIndex1);
-  ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
-  vTaskDelay(300 / portTICK_PERIOD_MS);
-  ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
+
+  if(fire_mode == 1) loop = fire_burst;
+  for (int i=0; i<loop; i++)
+  {
+    ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
+    ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+    ESP32_ISR_Servos.enable(servoIndex1);
+    ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
+    while (speed_first == false){
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+    //vTaskDelay(300 / portTICK_PERIOD_MS);
+    ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
+  }
+  // Slow down the motors
   while (motor_speed > 0){
     motor_speed = motor_speed - 5;
     ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
@@ -223,7 +231,8 @@ void fireDart(const String& dataString)
   }
   ESP32_ISR_Servos.disable(servoIndex1);
   motor_speed = 0;
-  txString = "F;Ready";
+  txString = "F;Ready;";
+  txString += dart_speed;
 }
 
 void setup()
