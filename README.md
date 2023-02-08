@@ -10,7 +10,7 @@
 * Integrated speed measure
 * Max dart speed 140KPH
 
-## BOM :
+## BOM
 | __NB__ | __Part__                                                  | Link |
 | -------|:----------------------------------------------------------|:-----|
 | 2      | Armattan Oomph Velvet Edition 2206/2300 KV Motor	Armattan | [Armattan](https://armattanquads.com/armattan-oomph-velvet-edition-2206-2300-kv-motor/)|
