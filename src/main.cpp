@@ -21,8 +21,12 @@ uint8_t txValue = 0;
 
 TaskHandle_t read_bat = NULL;
 TaskHandle_t pos_loop = NULL;
+TaskHandle_t fir_loop = NULL;
 
-SemaphoreHandle_t Semaphore = NULL;
+QueueHandle_t pos_queue;
+QueueHandle_t fir_queue;
+int pos_queueSize = 4;
+int fir_queueSize = 7;
 
 // the uart used to control servos.
 // GPIO 18 - S_RXD, GPIO 19 - S_TXD, as default.
@@ -54,20 +58,10 @@ volatile unsigned long speed_out = 0;
 volatile bool speed_first = true;
 volatile int shout = 0;
 
-volatile int pos_x = 0;
-volatile int pos_y = 0;
-volatile int speed_x = 0;
-volatile int speed_y = 0;
 volatile int separator_1, separator_2, separator_3, separator_4, separator_5;
 
-volatile int fire = 0;
-volatile int fire_mode = 0;
-volatile int fire_speed = 0;
-volatile int fire_burst = 0;
-volatile int fire_auto_speed = 0;
-
-volatile int servo_back = 120;
-volatile int servo_front = 5;
+int servo_back = 120;
+int servo_front = 5;
 String rxString;
 String txString;
 String rxPosString;
@@ -131,7 +125,7 @@ void IRAM_ATTR onTimer(){
 
 // Measure dart speed
 // 70mm dart
-void measure_speed()
+void measureSpeed()
 {
   unsigned long speed;
 
@@ -151,6 +145,76 @@ void measure_speed()
 
 }
 
+void positionLoop(void * parameter)
+{
+  int pos_x;
+  int pos_y;
+  int speed_x;
+  int speed_y;
+  for(;;) {
+    Serial.println("Position values");
+    if(xQueueReceive(pos_queue, &pos_x, portMAX_DELAY)){
+      Serial.println(pos_x);
+    }
+    if(xQueueReceive(pos_queue, &pos_y, portMAX_DELAY)){
+      Serial.println(pos_y);
+    }
+    if(xQueueReceive(pos_queue, &speed_x, portMAX_DELAY)){
+      Serial.println(speed_x);
+    }
+    if(xQueueReceive(pos_queue, &speed_y, portMAX_DELAY)){
+      Serial.println(speed_y);
+    }
+    sc.RegWritePos(0, pos_x, 0, speed_x);
+    sc.RegWritePos(1, pos_y, 0, speed_y);
+    sc.RegWriteAction();
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+void fireLoop(void * parameter)
+{
+  int fire;
+  int fire_mode;
+  int fire_speed;
+  int fire_burst;
+  int fire_auto_speed;
+  int fire_servo_front;
+  int fire_servo_back;
+
+  for (;;) {
+    Serial.println("Fire values");
+    if(xQueueReceive(fir_queue, &fire, portMAX_DELAY)){
+      Serial.print(fire);
+    }
+    if(xQueueReceive(fir_queue, &fire_mode, portMAX_DELAY)){
+      Serial.print(";");
+      Serial.print(fire_mode);
+    }
+    if(xQueueReceive(fir_queue, &fire_speed, portMAX_DELAY)){
+      Serial.print(";");
+      Serial.print(fire_speed);
+    }
+    if(xQueueReceive(fir_queue, &fire_burst, portMAX_DELAY)){
+      Serial.print(";");
+      Serial.print(fire_burst);
+    }
+    if(xQueueReceive(fir_queue, &fire_auto_speed, portMAX_DELAY)){
+      Serial.print(";");
+      Serial.print(fire_auto_speed);
+    }
+    if(xQueueReceive(fir_queue, &fire_servo_front, portMAX_DELAY)){
+      Serial.print(";");
+      Serial.print(fire_servo_front);
+    }
+    if(xQueueReceive(fir_queue, &fire_servo_front, portMAX_DELAY)){
+      Serial.print(";");
+      Serial.println(fire_servo_back);
+    }
+
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
 
 void readBatLoop(void * parameter)
 {
@@ -166,6 +230,12 @@ void readBatLoop(void * parameter)
 
 void moveTurret(const String& dataString)
 {
+
+  int pos_x;
+  int pos_y;
+  int speed_x;
+  int speed_y;
+
   Serial.println(dataString);
   pos_x = dataString.toInt();
   separator_1 = dataString.indexOf(";");
@@ -174,19 +244,24 @@ void moveTurret(const String& dataString)
   speed_x = dataString.substring(separator_2+1).toInt();
   separator_3 = dataString.indexOf(";", separator_2+1);
   speed_y = dataString.substring(separator_3+1).toInt();
-  Serial.println("Position values");
-  Serial.println(pos_x);
-  Serial.println(pos_y);
-  Serial.println(speed_x);
-  Serial.println(speed_y);
-  sc.RegWritePos(0, pos_x, 0, speed_x);
-  sc.RegWritePos(1, pos_y, 0, speed_y);
-  sc.RegWriteAction();
+
+  xQueueSend(pos_queue, &pos_x, portMAX_DELAY);
+  xQueueSend(pos_queue, &pos_y, portMAX_DELAY);
+  xQueueSend(pos_queue, &speed_x, portMAX_DELAY);
+  xQueueSend(pos_queue, &speed_y, portMAX_DELAY);
   txPosString = "P;Ready";
 }
 
 void fireDart(const String& dataString)
 {
+  int fire;
+  int fire_mode;
+  int fire_speed;
+  int fire_burst;
+  int fire_auto_speed;
+  int fire_servo_front = servo_front;
+  int fire_servo_back = servo_back;
+
   fire = dataString.toInt();
   separator_1 = dataString.indexOf(";");
   fire_mode = dataString.substring(separator_1+1).toInt();
@@ -196,14 +271,16 @@ void fireDart(const String& dataString)
   fire_burst = dataString.substring(separator_3+1).toInt();
   separator_4 = dataString.indexOf(";", separator_3+1);
   fire_auto_speed = dataString.substring(separator_4+1).toInt();
-  Serial.println("Fire values :");
-  Serial.println(fire);
-  Serial.println(fire_mode);
-  Serial.println(fire_speed);
-  Serial.println(fire_burst);
-  Serial.println(fire_auto_speed);
 
-  motor_speed = fire_speed;
+  Serial.print("START - Fire queue");
+  xQueueSend(fir_queue, &fire, portMAX_DELAY);
+  xQueueSend(fir_queue, &fire_mode, portMAX_DELAY);
+  xQueueSend(fir_queue, &fire_speed, portMAX_DELAY);
+  xQueueSend(fir_queue, &fire_burst, portMAX_DELAY);
+  xQueueSend(fir_queue, &fire_auto_speed, portMAX_DELAY);
+  xQueueSend(fir_queue, &fire_servo_front, portMAX_DELAY);
+  xQueueSend(fir_queue, &fire_servo_back, portMAX_DELAY);
+  Serial.print("END - Fire queue");
 
   ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
   ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
@@ -213,15 +290,14 @@ void fireDart(const String& dataString)
   ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
 
   // Set timer fot shouting error
-  timer = timerBegin(0, 80, true);
-  timerAttachInterrupt(timer, &onTimer, true);
-  timerAlarmWrite(timer, 500000, true);
-  timerAlarmEnable(timer);
+  //timer = timerBegin(0, 80, true);
+  //timerAttachInterrupt(timer, &onTimer, true);
+  //timerAlarmWrite(timer, 500000, true);
+  //timerAlarmEnable(timer);
 
   while (shout == 0){
     vTaskDelay(10 / portTICK_PERIOD_MS);
   }
-  Serial.println(motor_speed);
   vTaskDelay(300 / portTICK_PERIOD_MS);
   Serial.println(servo_back);
   ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
@@ -231,14 +307,9 @@ void fireDart(const String& dataString)
     motor_speed = motor_speed - 5;
     ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
     ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
-    Serial.println(motor_speed);
     vTaskDelay(10 / portTICK_PERIOD_MS);
   }
-  gfx->setCursor(0, 0);
-  gfx->fillScreen(BLACK);
-  gfx->println(speed_in);
-  gfx->println(speed_out);
-  gfx->println(dart_speed);
+
   if (shout == -1){
     txString = "F;Ready;ERR";
   }else{
@@ -259,10 +330,24 @@ void setup()
 
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
-  Semaphore = xSemaphoreCreateMutex();
 
-  xTaskCreatePinnedToCore(readBatLoop, "ReadBat", 1000, NULL, 0, &read_bat, 1); 
-  //xTaskCreatePinnedToCore(posLoop, "PosLoop", 1000, NULL, 0, &pos_loop, 1);
+  // Multitasking
+  pos_queue = xQueueCreate( pos_queueSize, sizeof( int ) );
+  if(pos_queue == NULL){
+    Serial.println("Error creating the POS queue");
+  }else{
+    Serial.println("POS queue created");
+  }
+  fir_queue = xQueueCreate( fir_queueSize, sizeof( int ) );
+  if(fir_queue == NULL){
+    Serial.println("Error creating the FIR queue");
+  }else{
+    Serial.println("FIR queue created");
+  }
+ 
+  //xTaskCreatePinnedToCore(readBatLoop, "ReadBat", 4096, NULL, 0, &read_bat, 1); 
+  xTaskCreatePinnedToCore(positionLoop, "positionLoop", 4096, NULL, 0, &pos_loop, 1);
+  xTaskCreatePinnedToCore(fireLoop, "fireLoop", 4096, NULL, 0, &fir_loop, 1);
 
   // Setup LCD Screen
   pinMode(TFT_BL, OUTPUT);
@@ -301,12 +386,13 @@ void setup()
   Serial.println("Waiting a client connection to notify...");
   gfx->println("BLE Started");
 
-  /* Setup : Loading servo, ESC motor 1 & ESC motor 2
-     Loading servo
-      - low position : 125
-      - high position : 10
-  */
+  // Setup : Loading servo, ESC motor 1 & ESC motor 2
+  //  Loading servo
+  //  - low position : 125
+  //  - high position : 10
 
+  //Select ESP32 timer USE_ESP32_TIMER_NO
+  ESP32_ISR_Servos.useTimer(USE_ESP32_TIMER_NO);
   escIndex1 = ESP32_ISR_Servos.setupServo(PIN_ESC1, MIN_MICROS, MAX_MICROS);
   escIndex2 = ESP32_ISR_Servos.setupServo(PIN_ESC2, MIN_MICROS, MAX_MICROS);
   servoIndex1 = ESP32_ISR_Servos.setupServo(PIN_SERVO1, MIN_MICROS_S, MAX_MICROS_S);
@@ -315,16 +401,14 @@ void setup()
   ESP32_ISR_Servos.setPosition(servoIndex1, 125);
   delay(500);
   ESP32_ISR_Servos.disable(servoIndex1);
+
   // Setup : Speed module
   pinMode(PIN_INT,  INPUT_PULLUP);
-  attachInterrupt(PIN_INT, measure_speed, CHANGE);
+  attachInterrupt(PIN_INT, measureSpeed, CHANGE);
 
   // Setup : Serial servos
   Serial1.begin(1000000, SERIAL_8N1, S_RXD, S_TXD);
   sc.pSerial = &Serial1;
-  //---- ESC
-  //Select ESP32 timer USE_ESP32_TIMER_NO
-  ESP32_ISR_Servos.useTimer(USE_ESP32_TIMER_NO);
 }
 
 void loop()
