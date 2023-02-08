@@ -23,10 +23,10 @@ TaskHandle_t read_bat = NULL;
 TaskHandle_t pos_loop = NULL;
 TaskHandle_t fir_loop = NULL;
 
-QueueHandle_t pos_queue;
-QueueHandle_t fir_queue;
-int pos_queueSize = 4;
-int fir_queueSize = 7;
+QueueHandle_t pos_queue = NULL;
+QueueHandle_t fir_queue = NULL;
+int pos_queueSize = 16;
+int fir_queueSize = 14;
 
 // the uart used to control servos.
 // GPIO 18 - S_RXD, GPIO 19 - S_TXD, as default.
@@ -115,7 +115,6 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 // Reset dart speed measure
 // Fire Interrupt
 void IRAM_ATTR onTimer(){
-  Serial.println("End Timer");
   timerAlarmDisable(timer);		// stop alarm
   timerDetachInterrupt(timer);	// detach interrupt
   timerEnd(timer);			// end timer
@@ -168,7 +167,7 @@ void positionLoop(void * parameter)
     sc.RegWritePos(0, pos_x, 0, speed_x);
     sc.RegWritePos(1, pos_y, 0, speed_y);
     sc.RegWriteAction();
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    //vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
@@ -212,7 +211,34 @@ void fireLoop(void * parameter)
       Serial.println(fire_servo_back);
     }
 
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
+    ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+    ESP32_ISR_Servos.enable(servoIndex1);
+    ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
+    
+    // Set timer fot shouting error
+    //timer = timerBegin(0, 80, true);
+    //timerAttachInterrupt(timer, &onTimer, true);
+    //timerAlarmWrite(timer, 500000, true);
+    //timerAlarmEnable(timer);
+
+    //while (shout == 0){
+    //  vTaskDelay(10 / portTICK_PERIOD_MS);
+    //}
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+    ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
+
+    // Slow down the motors
+    while (motor_speed > 0){
+      motor_speed = motor_speed - 5;
+      ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
+      ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+    ESP32_ISR_Servos.disable(servoIndex1);
+
+    //vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
@@ -245,10 +271,10 @@ void moveTurret(const String& dataString)
   separator_3 = dataString.indexOf(";", separator_2+1);
   speed_y = dataString.substring(separator_3+1).toInt();
 
-  xQueueSend(pos_queue, &pos_x, portMAX_DELAY);
-  xQueueSend(pos_queue, &pos_y, portMAX_DELAY);
-  xQueueSend(pos_queue, &speed_x, portMAX_DELAY);
-  xQueueSend(pos_queue, &speed_y, portMAX_DELAY);
+  xQueueSend(pos_queue, &pos_x, 0);
+  xQueueSend(pos_queue, &pos_y, 0);
+  xQueueSend(pos_queue, &speed_x, 0);
+  xQueueSend(pos_queue, &speed_y, 0);
   txPosString = "P;Ready";
 }
 
@@ -272,7 +298,6 @@ void fireDart(const String& dataString)
   separator_4 = dataString.indexOf(";", separator_3+1);
   fire_auto_speed = dataString.substring(separator_4+1).toInt();
 
-  Serial.print("START - Fire queue");
   xQueueSend(fir_queue, &fire, portMAX_DELAY);
   xQueueSend(fir_queue, &fire_mode, portMAX_DELAY);
   xQueueSend(fir_queue, &fire_speed, portMAX_DELAY);
@@ -280,35 +305,6 @@ void fireDart(const String& dataString)
   xQueueSend(fir_queue, &fire_auto_speed, portMAX_DELAY);
   xQueueSend(fir_queue, &fire_servo_front, portMAX_DELAY);
   xQueueSend(fir_queue, &fire_servo_back, portMAX_DELAY);
-  Serial.print("END - Fire queue");
-
-  ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
-  ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
-  vTaskDelay(300 / portTICK_PERIOD_MS);
-  ESP32_ISR_Servos.enable(servoIndex1);
-  Serial.println(servo_front);
-  ESP32_ISR_Servos.setPosition(servoIndex1, servo_front);
-
-  // Set timer fot shouting error
-  //timer = timerBegin(0, 80, true);
-  //timerAttachInterrupt(timer, &onTimer, true);
-  //timerAlarmWrite(timer, 500000, true);
-  //timerAlarmEnable(timer);
-
-  while (shout == 0){
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-  }
-  vTaskDelay(300 / portTICK_PERIOD_MS);
-  Serial.println(servo_back);
-  ESP32_ISR_Servos.setPosition(servoIndex1, servo_back);
-
-  // Slow down the motors
-  while (motor_speed > 0){
-    motor_speed = motor_speed - 5;
-    ESP32_ISR_Servos.setPosition(escIndex1, motor_speed);
-    ESP32_ISR_Servos.setPosition(escIndex2, motor_speed);
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-  }
 
   if (shout == -1){
     txString = "F;Ready;ERR";
@@ -316,13 +312,13 @@ void fireDart(const String& dataString)
     txString = "F;Ready;";
     txString += dart_speed;
   }
-
-  motor_speed = 0;
-  ESP32_ISR_Servos.disable(servoIndex1);
 }
 
 void setup()
 {
+
+
+  
   txString.reserve(64);
   rxString.reserve(64);
   txPosString.reserve(64);
@@ -330,7 +326,7 @@ void setup()
 
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
-
+  delay(2000);
   // Multitasking
   pos_queue = xQueueCreate( pos_queueSize, sizeof( int ) );
   if(pos_queue == NULL){
@@ -347,7 +343,7 @@ void setup()
  
   //xTaskCreatePinnedToCore(readBatLoop, "ReadBat", 4096, NULL, 0, &read_bat, 1); 
   xTaskCreatePinnedToCore(positionLoop, "positionLoop", 4096, NULL, 0, &pos_loop, 1);
-  xTaskCreatePinnedToCore(fireLoop, "fireLoop", 4096, NULL, 0, &fir_loop, 1);
+  xTaskCreatePinnedToCore(fireLoop, "fireLoop", 9192, NULL, 0, &fir_loop, 1);
 
   // Setup LCD Screen
   pinMode(TFT_BL, OUTPUT);
@@ -431,9 +427,7 @@ void loop()
           moveTurret(rxString.substring(2));
           break;
         case 'F':
-          gfx->println("Fire Started");
           fireDart(rxString.substring(2));
-          gfx->println("Fire Ended");
           break;
         case 'B':
           Serial.println("Batery\n");
