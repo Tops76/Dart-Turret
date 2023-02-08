@@ -1,15 +1,16 @@
 ![Dart Turret](https://github.com/Tops76/Dart-Turret/blob/main/assets/Dart_Turret_github.jpg)
 
-Nerf Automatic Dart Turret
+# Automatic Dart (Nerf) Turret
 
 3D printable files on  [Printables](https://www.printables.com/model/338574-nerf-dart-turret-brushless-wifi-wip)
 
+## Features
 * 2 Axis Gimbal
 * Raspberry/ESP32 controlled
 * Integrated speed measure
 * Max dart speed 140KPH
 
-##BOM :
+## BOM :
 | __NB__ | __Part__                                                  | Link |
 | -------|:----------------------------------------------------------|:-----|
 | 2      | Armattan Oomph Velvet Edition 2206/2300 KV Motor	Armattan | [Armattan](https://armattanquads.com/armattan-oomph-velvet-edition-2206-2300-kv-motor/)|
