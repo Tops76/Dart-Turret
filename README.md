@@ -23,3 +23,5 @@
 | 1      | 16mm diameter carbon tube                                 |      |
 | 2      | 12mm diameter carbon tube                                 |      |
 | X      | M3 Screws all kind of length                              |      |
+
+![Wiring Diagram](https://github.com/Tops76/Dart-Turret/blob/main/assets/Dart_Turret_Wiring_Diagram.jpg)
