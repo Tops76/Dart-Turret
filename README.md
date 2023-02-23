@@ -17,6 +17,9 @@
 | 2      | 20 to 30A ESC                                             |      |
 | 1      | RC Servo                                                  |      |
 | 2      | SC15 17Kg Serial Bus Servo	WaveShare                      | [WaveShare](https://www.waveshare.com/sc15-servo.htm)     |
+| 1      | Level Shifter                                             |      |
+| 1      | TTLinker                                                  | [Aliexpress](https://www.aliexpress.com/item/1005004198537971.html)     |
+| 3      | MP1584 Buck Converter                                     |      |
 | 1      | Raspberry PI 3 or 4                                       |      |
 | 1      | ESP32-S3 Bluetooth BLE                                    |      |
 | 4      | 18650 battery                                             |      |
