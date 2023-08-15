@@ -4,8 +4,6 @@
 
 3D printable files on  [Printables](https://www.printables.com/model/338574-nerf-dart-turret-brushless-wifi-wip)
 
-{% include youtube.html id="cYqL7gMsiQk" %}
-
 ## Features
 * 2 Axis Gimbal
 * Raspberry/ESP32 controlled
