@@ -4,7 +4,7 @@
 
 3D printable files on  [Printables](https://www.printables.com/model/338574-nerf-dart-turret-brushless-wifi-wip)
 
-<iframe width="560" height="315" src="https://www.youtube.com/embed/cYqL7gMsiQk" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+https://www.youtube.com/watch?v=cYqL7gMsiQk
 
 ## Features
 * 2 Axis Gimbal
